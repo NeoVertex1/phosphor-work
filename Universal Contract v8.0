@@ -1,0 +1,1504 @@
+# Universal Contract v8.0
+## Adaptive Multi-Dimensional Reasoning Framework
+
+---
+
+# What's New in v8.0
+
+| Issue in v7 | Solution in v8 |
+|-------------|----------------|
+| Fake calibration scores | Feedback loop with ground truth tracking |
+| Naive evidence encoding | Embedding-based classification + trained router |
+| No learning | Memory store of past evaluations |
+| No human escalation | Escalation paths with confidence thresholds |
+| Vibes-based confidence | Calibrated probability with Platt scaling |
+| One-shot evaluation | Multi-round deliberation protocol |
+| Shallow dependency analysis | Typed dependency graph with uncertainty propagation |
+| No cost optimization | Staged evaluation with early exit |
+| No adversarial defense | Manipulation detection layer |
+| Black box reasoning | Explicit reasoning chains |
+| No temporal handling | Evidence freshness scoring + versioning |
+| Scaling issues | Hierarchical chunking + progressive summarization |
+
+---
+
+# Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         TASK INPUT                               │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      MEMORY RETRIEVAL                            │
+│         (similar past evaluations, learned patterns)             │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    EVIDENCE PROCESSOR                            │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐                │
+│  │  Embedding  │ │  Freshness  │ │ Adversarial │                │
+│  │   Router    │ │   Scoring   │ │  Detection  │                │
+│  └─────────────┘ └─────────────┘ └─────────────┘                │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      STAGED EVALUATOR                            │
+│                                                                  │
+│   Stage 1: Quick Assessment (cheap/fast)                         │
+│       └─► early exit if clear pass/fail                         │
+│   Stage 2: Full Evaluation (if needed)                          │
+│       └─► parallel judges                                        │
+│   Stage 3: Deep Dive (if high stakes / low confidence)          │
+│       └─► deliberation + human escalation                       │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   DELIBERATION ENGINE                            │
+│         (multi-round, judges can challenge each other)           │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   DEPENDENCY GRAPH                               │
+│         (typed edges, uncertainty propagation)                   │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 CONFIDENCE CALIBRATOR                            │
+│         (Platt scaling, isotonic regression)                     │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      OUTPUT + FEEDBACK                           │
+│         (store result, update calibration on ground truth)       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+# 1. Memory & Learning System
+
+## Past Evaluation Store
+
+```typescript
+interface EvaluationMemory {
+  id: string;
+  timestamp: Date;
+  task: string;
+  taskEmbedding: number[];
+  dimensions: string[];
+  evidence: EvidenceSummary[];
+  results: Record<string, DimensionResult>;
+  groundTruth?: GroundTruth;  // filled in later via feedback
+  calibrationData: CalibrationPoint[];
+}
+
+interface GroundTruth {
+  dimension: string;
+  actualOutcome: 'correct' | 'incorrect' | 'partial';
+  feedbackSource: 'human' | 'outcome' | 'audit';
+  feedbackDate: Date;
+  notes?: string;
+}
+
+interface CalibrationPoint {
+  predictedConfidence: number;
+  wasCorrect: boolean;
+  dimension: string;
+  judgeId: string;
+}
+```
+
+## Memory Retrieval
+
+before evaluating, search for similar past tasks:
+
+```typescript
+async function retrieveSimilarEvaluations(
+  task: string,
+  limit: number = 5
+): Promise<EvaluationMemory[]> {
+  const taskEmbedding = await embed(task);
+  
+  // vector search on past evaluations
+  const similar = await memoryStore.search({
+    vector: taskEmbedding,
+    limit,
+    filter: { hasGroundTruth: true }  // prefer validated examples
+  });
+  
+  return similar.map(s => s.metadata as EvaluationMemory);
+}
+
+function extractPatternsFromMemory(memories: EvaluationMemory[]): LearnedPatterns {
+  return {
+    // which dimensions were most relevant for similar tasks
+    relevantDimensions: countDimensionFrequency(memories),
+    
+    // which judges performed best on similar tasks
+    judgePerformance: aggregateJudgeAccuracy(memories),
+    
+    // what evidence patterns led to correct answers
+    evidencePatterns: extractSuccessfulPatterns(memories),
+    
+    // common failure modes
+    failureModes: extractFailureModes(memories)
+  };
+}
+```
+
+## Feedback Loop
+
+```typescript
+async function recordFeedback(
+  evaluationId: string,
+  feedback: GroundTruth
+): Promise<void> {
+  const evaluation = await memoryStore.get(evaluationId);
+  
+  // store ground truth
+  evaluation.groundTruth = feedback;
+  
+  // create calibration points for each dimension
+  for (const [dim, result] of Object.entries(evaluation.results)) {
+    const wasCorrect = assessCorrectness(result, feedback);
+    
+    evaluation.calibrationData.push({
+      predictedConfidence: result.confidence,
+      wasCorrect,
+      dimension: dim,
+      judgeId: result.judgeId
+    });
+    
+    // update judge calibration scores
+    await updateJudgeCalibration(result.judgeId, wasCorrect, result.confidence);
+  }
+  
+  await memoryStore.update(evaluationId, evaluation);
+}
+
+async function updateJudgeCalibration(
+  judgeId: string,
+  wasCorrect: boolean,
+  predictedConfidence: number
+): Promise<void> {
+  const judge = await judgeRegistry.get(judgeId);
+  
+  // exponential moving average for calibration
+  const alpha = 0.1;
+  const error = wasCorrect ? (1 - predictedConfidence) : predictedConfidence;
+  
+  judge.calibrationError = alpha * error + (1 - alpha) * judge.calibrationError;
+  judge.totalEvaluations += 1;
+  judge.correctEvaluations += wasCorrect ? 1 : 0;
+  
+  // update calibration score (inverse of error)
+  judge.calibrationScore = 1 - judge.calibrationError;
+  
+  await judgeRegistry.update(judgeId, judge);
+}
+```
+
+---
+
+# 2. Evidence Processor
+
+## Embedding-Based Channel Router
+
+```typescript
+interface EvidenceRouterModel {
+  // trained classifier that routes evidence to channels
+  predict(embedding: number[], query: string): ChannelPrediction;
+}
+
+interface ChannelPrediction {
+  channel: ChannelType;
+  confidence: number;
+  alternativeChannels: Array<{ channel: ChannelType; confidence: number }>;
+}
+
+async function routeEvidence(
+  evidence: string,
+  query: string,
+  router: EvidenceRouterModel
+): Promise<EncodedEvidence> {
+  const evidenceEmbedding = await embed(evidence);
+  const queryEmbedding = await embed(query);
+  
+  // semantic relevance via embedding similarity
+  const relevance = cosineSimilarity(evidenceEmbedding, queryEmbedding);
+  
+  // channel classification via trained model
+  const channelPrediction = router.predict(evidenceEmbedding, query);
+  
+  // quality classification via separate model
+  const quality = await classifyQuality(evidence, query);
+  
+  return {
+    content: evidence,
+    embedding: evidenceEmbedding,
+    relevance,
+    quality,
+    channel: channelPrediction.channel,
+    channelConfidence: channelPrediction.confidence,
+    weight: computeWeight(relevance, quality, channelPrediction.confidence)
+  };
+}
+```
+
+## Freshness Scoring
+
+```typescript
+interface FreshnessMetadata {
+  documentDate?: Date;
+  retrievalDate: Date;
+  topicVolatility: 'stable' | 'moderate' | 'volatile';
+  freshnessScore: number;
+}
+
+function computeFreshnessScore(
+  evidence: Evidence,
+  metadata: FreshnessMetadata
+): number {
+  const now = new Date();
+  
+  // base decay rate depends on topic volatility
+  const decayRates = {
+    stable: 0.001,      // legal precedents, historical facts
+    moderate: 0.01,     // industry trends, company info
+    volatile: 0.1       // stock prices, breaking news
+  };
+  
+  const decayRate = decayRates[metadata.topicVolatility];
+  const daysSinceDocument = metadata.documentDate 
+    ? (now.getTime() - metadata.documentDate.getTime()) / (1000 * 60 * 60 * 24)
+    : 365;  // assume old if unknown
+  
+  // exponential decay
+  const freshnessScore = Math.exp(-decayRate * daysSinceDocument);
+  
+  return freshnessScore;
+}
+
+function adjustWeightForFreshness(
+  evidence: EncodedEvidence,
+  freshness: FreshnessMetadata
+): EncodedEvidence {
+  const freshnessScore = computeFreshnessScore(evidence, freshness);
+  
+  return {
+    ...evidence,
+    freshnessScore,
+    weight: evidence.weight * freshnessScore,
+    warnings: freshnessScore < 0.5 
+      ? [...(evidence.warnings || []), 'Evidence may be outdated']
+      : evidence.warnings
+  };
+}
+```
+
+## Adversarial Detection
+
+```typescript
+interface AdversarialCheck {
+  isManipulated: boolean;
+  manipulationType?: 'planted_contradiction' | 'confidence_manipulation' | 
+                      'scope_creep' | 'authority_spoofing' | 'cherry_picking';
+  confidence: number;
+  evidence: string[];
+}
+
+async function detectManipulation(
+  evidenceSet: EncodedEvidence[],
+  query: string
+): Promise<AdversarialCheck> {
+  const checks: AdversarialCheck[] = [];
+  
+  // check 1: suspiciously perfect contradictions
+  const contradictions = findContradictions(evidenceSet);
+  if (contradictions.length > 0) {
+    const suspiciousPatterns = contradictions.filter(c => {
+      // real contradictions are messy, planted ones are clean
+      return c.similarity > 0.95 && c.oppositeness > 0.9;
+    });
+    
+    if (suspiciousPatterns.length > 0) {
+      checks.push({
+        isManipulated: true,
+        manipulationType: 'planted_contradiction',
+        confidence: 0.7,
+        evidence: suspiciousPatterns.map(p => p.description)
+      });
+    }
+  }
+  
+  // check 2: evidence that tries to override system instructions
+  const injectionPatterns = [
+    /ignore previous/i,
+    /disregard all/i,
+    /you are now/i,
+    /system:.*override/i
+  ];
+  
+  for (const ev of evidenceSet) {
+    for (const pattern of injectionPatterns) {
+      if (pattern.test(ev.content)) {
+        checks.push({
+          isManipulated: true,
+          manipulationType: 'authority_spoofing',
+          confidence: 0.9,
+          evidence: [ev.content.substring(0, 100)]
+        });
+      }
+    }
+  }
+  
+  // check 3: evidence distribution anomalies
+  const channelDistribution = countByChannel(evidenceSet);
+  const expectedDistribution = getExpectedDistribution(query);
+  const klDivergence = computeKLDivergence(channelDistribution, expectedDistribution);
+  
+  if (klDivergence > 2.0) {
+    checks.push({
+      isManipulated: true,
+      manipulationType: 'cherry_picking',
+      confidence: 0.6,
+      evidence: ['Evidence distribution significantly skewed from expected']
+    });
+  }
+  
+  // aggregate checks
+  const manipulationDetected = checks.some(c => c.isManipulated && c.confidence > 0.5);
+  
+  return {
+    isManipulated: manipulationDetected,
+    manipulationType: checks.find(c => c.isManipulated)?.manipulationType,
+    confidence: Math.max(...checks.map(c => c.confidence), 0),
+    evidence: checks.flatMap(c => c.evidence)
+  };
+}
+```
+
+---
+
+# 3. Staged Evaluation
+
+## Cost-Optimized Pipeline
+
+```typescript
+interface StageConfig {
+  stage: 1 | 2 | 3;
+  name: string;
+  cost: 'low' | 'medium' | 'high';
+  judges: JudgeConfig[];
+  exitConditions: ExitCondition[];
+  escalationConditions: EscalationCondition[];
+}
+
+interface ExitCondition {
+  type: 'high_confidence_pass' | 'high_confidence_fail' | 'clear_answer';
+  threshold: number;
+}
+
+interface EscalationCondition {
+  type: 'low_confidence' | 'high_stakes' | 'conflict_detected' | 'human_required';
+  threshold?: number;
+}
+
+const STAGED_PIPELINE: StageConfig[] = [
+  {
+    stage: 1,
+    name: 'Quick Assessment',
+    cost: 'low',
+    judges: [
+      { type: 'fast_classifier', dimensions: ['all'] }  // single cheap model
+    ],
+    exitConditions: [
+      { type: 'high_confidence_pass', threshold: 0.95 },
+      { type: 'high_confidence_fail', threshold: 0.95 }
+    ],
+    escalationConditions: [
+      { type: 'low_confidence', threshold: 0.6 }
+    ]
+  },
+  {
+    stage: 2,
+    name: 'Full Evaluation',
+    cost: 'medium',
+    judges: [
+      { type: 'specialized', dimensions: ['legal', 'technical', 'financial', 'risk'] }
+    ],
+    exitConditions: [
+      { type: 'clear_answer', threshold: 0.8 }
+    ],
+    escalationConditions: [
+      { type: 'conflict_detected' },
+      { type: 'low_confidence', threshold: 0.5 },
+      { type: 'high_stakes' }
+    ]
+  },
+  {
+    stage: 3,
+    name: 'Deep Deliberation',
+    cost: 'high',
+    judges: [
+      { type: 'specialized', dimensions: ['all'] },
+      { type: 'devil_advocate', dimensions: ['all'] },
+      { type: 'meta_reviewer', dimensions: ['all'] }
+    ],
+    exitConditions: [],  // always completes
+    escalationConditions: [
+      { type: 'human_required' }
+    ]
+  }
+];
+
+async function stagedEvaluation(
+  task: Task,
+  evidence: EncodedEvidence[],
+  config: StageConfig[] = STAGED_PIPELINE
+): Promise<StagedResult> {
+  let currentStage = 0;
+  let results: Record<string, DimensionResult> = {};
+  let shouldEscalate = false;
+  
+  for (const stage of config) {
+    console.log(`Running ${stage.name}...`);
+    
+    // run judges for this stage
+    const stageResults = await runStageJudges(stage, task, evidence, results);
+    results = { ...results, ...stageResults };
+    
+    // check exit conditions
+    const canExit = checkExitConditions(stage.exitConditions, results);
+    if (canExit) {
+      return {
+        results,
+        stageCompleted: stage.stage,
+        exitReason: canExit.reason,
+        escalatedToHuman: false
+      };
+    }
+    
+    // check escalation conditions
+    const needsEscalation = checkEscalationConditions(stage.escalationConditions, results, task);
+    if (needsEscalation.type === 'human_required') {
+      return {
+        results,
+        stageCompleted: stage.stage,
+        escalatedToHuman: true,
+        escalationReason: needsEscalation.reason
+      };
+    }
+    
+    // continue to next stage if escalation needed
+    if (!needsEscalation.shouldContinue) {
+      break;
+    }
+    
+    currentStage++;
+  }
+  
+  return {
+    results,
+    stageCompleted: currentStage + 1,
+    exitReason: 'completed_all_stages',
+    escalatedToHuman: false
+  };
+}
+```
+
+---
+
+# 4. Deliberation Engine
+
+## Multi-Round Protocol
+
+```typescript
+interface DeliberationRound {
+  roundNumber: number;
+  judgeOutputs: Record<string, JudgeOutput>;
+  challenges: Challenge[];
+  responses: ChallengeResponse[];
+  updatedPositions: Record<string, DimensionResult>;
+  consensusReached: boolean;
+}
+
+interface Challenge {
+  challengerId: string;
+  targetJudgeId: string;
+  targetDimension: string;
+  challengeType: 'evidence_quality' | 'reasoning_flaw' | 'missing_consideration' | 'factual_error';
+  description: string;
+  requestedAction: 'reconsider' | 'provide_evidence' | 'clarify';
+}
+
+interface ChallengeResponse {
+  responderId: string;
+  challengeId: string;
+  response: 'accepted' | 'rejected' | 'partially_accepted';
+  updatedVerdict?: string;
+  updatedScore?: number;
+  reasoning: string;
+}
+
+async function runDeliberation(
+  task: Task,
+  evidence: EncodedEvidence[],
+  initialResults: Record<string, DimensionResult>,
+  maxRounds: number = 3
+): Promise<DeliberationResult> {
+  const rounds: DeliberationRound[] = [];
+  let currentResults = { ...initialResults };
+  
+  for (let round = 1; round <= maxRounds; round++) {
+    // each judge can challenge others
+    const challenges = await generateChallenges(currentResults, evidence);
+    
+    if (challenges.length === 0) {
+      // no challenges = consensus
+      return {
+        rounds,
+        finalResults: currentResults,
+        consensusReached: true,
+        roundsNeeded: round
+      };
+    }
+    
+    // judges respond to challenges
+    const responses = await processChallengees(challenges, currentResults, evidence);
+    
+    // update positions based on responses
+    const updatedResults = applyResponses(currentResults, responses);
+    
+    rounds.push({
+      roundNumber: round,
+      judgeOutputs: currentResults,
+      challenges,
+      responses,
+      updatedPositions: updatedResults,
+      consensusReached: false
+    });
+    
+    currentResults = updatedResults;
+    
+    // check if positions have stabilized
+    if (positionsStabilized(rounds)) {
+      return {
+        rounds,
+        finalResults: currentResults,
+        consensusReached: true,
+        roundsNeeded: round
+      };
+    }
+  }
+  
+  return {
+    rounds,
+    finalResults: currentResults,
+    consensusReached: false,
+    roundsNeeded: maxRounds,
+    unresolvedChallenges: getUnresolvedChallenges(rounds)
+  };
+}
+
+async function generateChallenges(
+  results: Record<string, DimensionResult>,
+  evidence: EncodedEvidence[]
+): Promise<Challenge[]> {
+  const challenges: Challenge[] = [];
+  const dimensions = Object.keys(results);
+  
+  for (const dim1 of dimensions) {
+    for (const dim2 of dimensions) {
+      if (dim1 === dim2) continue;
+      
+      // check for factual conflicts
+      const factualConflict = detectFactualConflict(results[dim1], results[dim2]);
+      if (factualConflict) {
+        challenges.push({
+          challengerId: results[dim1].judgeId,
+          targetJudgeId: results[dim2].judgeId,
+          targetDimension: dim2,
+          challengeType: 'factual_error',
+          description: `Factual conflict: ${factualConflict.description}`,
+          requestedAction: 'provide_evidence'
+        });
+      }
+      
+      // check for weak evidence
+      if (results[dim2].confidence < 0.6 && results[dim2].evidence.length < 2) {
+        challenges.push({
+          challengerId: results[dim1].judgeId,
+          targetJudgeId: results[dim2].judgeId,
+          targetDimension: dim2,
+          challengeType: 'evidence_quality',
+          description: 'Verdict based on limited evidence',
+          requestedAction: 'provide_evidence'
+        });
+      }
+    }
+  }
+  
+  // devil's advocate challenges all high-confidence positive verdicts
+  for (const [dim, result] of Object.entries(results)) {
+    if (result.score > 0.8 && result.confidence > 0.8) {
+      challenges.push({
+        challengerId: 'devils_advocate',
+        targetJudgeId: result.judgeId,
+        targetDimension: dim,
+        challengeType: 'missing_consideration',
+        description: 'High confidence verdict - what could go wrong?',
+        requestedAction: 'reconsider'
+      });
+    }
+  }
+  
+  return challenges;
+}
+```
+
+---
+
+# 5. Dependency Graph
+
+## Typed Edges with Uncertainty Propagation
+
+```typescript
+type DependencyType = 
+  | 'causal'           // A causes B
+  | 'conditional'      // B only valid if A passes
+  | 'correlational'    // A and B move together
+  | 'contradicts'      // A and B cannot both be true
+  | 'amplifies'        // A makes B worse/better
+  | 'mitigates';       // A reduces impact of B
+
+interface DependencyEdge {
+  from: string;
+  to: string;
+  type: DependencyType;
+  strength: number;  // 0-1
+  description: string;
+  bidirectional: boolean;
+}
+
+interface DependencyGraph {
+  nodes: Map<string, DimensionResult>;
+  edges: DependencyEdge[];
+}
+
+function buildDependencyGraph(
+  results: Record<string, DimensionResult>
+): DependencyGraph {
+  const nodes = new Map(Object.entries(results));
+  const edges: DependencyEdge[] = [];
+  
+  // detect conditional dependencies
+  for (const [dimA, resultA] of Object.entries(results)) {
+    for (const [dimB, resultB] of Object.entries(results)) {
+      if (dimA === dimB) continue;
+      
+      // financial depends on technical
+      if (dimB === 'financial' && dimA === 'technical') {
+        if (mentionsAssumption(resultB, 'technical')) {
+          edges.push({
+            from: 'technical',
+            to: 'financial',
+            type: 'conditional',
+            strength: 0.8,
+            description: 'Financial projections assume technical architecture works',
+            bidirectional: false
+          });
+        }
+      }
+      
+      // detect amplification
+      if (resultA.score < 0.5 && resultB.score < 0.5) {
+        if (areRelated(resultA, resultB)) {
+          edges.push({
+            from: dimA,
+            to: dimB,
+            type: 'amplifies',
+            strength: 0.5,
+            description: `Weak ${dimA} compounds weak ${dimB}`,
+            bidirectional: true
+          });
+        }
+      }
+    }
+  }
+  
+  return { nodes, edges };
+}
+
+function propagateUncertainty(graph: DependencyGraph): Record<string, AdjustedResult> {
+  const adjusted: Record<string, AdjustedResult> = {};
+  
+  // topological sort for propagation order
+  const order = topologicalSort(graph);
+  
+  for (const dimId of order) {
+    const node = graph.nodes.get(dimId)!;
+    const incomingEdges = graph.edges.filter(e => e.to === dimId);
+    
+    let adjustedScore = node.score;
+    let adjustedConfidence = node.confidence;
+    const adjustmentReasons: string[] = [];
+    
+    for (const edge of incomingEdges) {
+      const sourceNode = graph.nodes.get(edge.from)!;
+      
+      switch (edge.type) {
+        case 'conditional':
+          // if source fails, this score becomes conditional
+          if (sourceNode.score < 0.5) {
+            adjustedConfidence *= 0.5;
+            adjustmentReasons.push(
+              `Confidence reduced: depends on ${edge.from} which scored ${sourceNode.score.toFixed(2)}`
+            );
+          }
+          break;
+          
+        case 'amplifies':
+          // compound effect
+          if (sourceNode.score < 0.5) {
+            adjustedScore *= (1 - edge.strength * (1 - sourceNode.score));
+            adjustmentReasons.push(
+              `Score reduced: amplified by weak ${edge.from}`
+            );
+          }
+          break;
+          
+        case 'mitigates':
+          // reduces negative impact
+          if (sourceNode.score > 0.7 && adjustedScore < 0.5) {
+            adjustedScore += edge.strength * (sourceNode.score - 0.5) * 0.3;
+            adjustmentReasons.push(
+              `Score improved: mitigated by strong ${edge.from}`
+            );
+          }
+          break;
+          
+        case 'contradicts':
+          // both cannot be high confidence
+          if (sourceNode.confidence > 0.7 && adjustedConfidence > 0.7) {
+            adjustedConfidence *= 0.7;
+            adjustmentReasons.push(
+              `Confidence reduced: contradicts ${edge.from}`
+            );
+          }
+          break;
+      }
+    }
+    
+    adjusted[dimId] = {
+      ...node,
+      originalScore: node.score,
+      originalConfidence: node.confidence,
+      adjustedScore,
+      adjustedConfidence,
+      adjustmentReasons
+    };
+  }
+  
+  return adjusted;
+}
+```
+
+---
+
+# 6. Confidence Calibration
+
+## Platt Scaling + Isotonic Regression
+
+```typescript
+interface CalibrationModel {
+  type: 'platt' | 'isotonic' | 'ensemble';
+  parameters: any;
+  trainedOn: number;  // number of examples
+  lastUpdated: Date;
+}
+
+interface PlattParameters {
+  A: number;
+  B: number;
+}
+
+// platt scaling: P(correct) = 1 / (1 + exp(A * score + B))
+function plattCalibrate(
+  rawConfidence: number,
+  params: PlattParameters
+): number {
+  return 1 / (1 + Math.exp(params.A * rawConfidence + params.B));
+}
+
+async function trainPlattScaling(
+  calibrationData: CalibrationPoint[]
+): Promise<PlattParameters> {
+  // logistic regression to find A and B
+  // minimizes cross-entropy between predicted and actual
+  
+  const { A, B } = await logisticRegression(
+    calibrationData.map(d => d.predictedConfidence),
+    calibrationData.map(d => d.wasCorrect ? 1 : 0)
+  );
+  
+  return { A, B };
+}
+
+// isotonic regression for non-parametric calibration
+function isotonicCalibrate(
+  rawConfidence: number,
+  isotonicMap: Map<number, number>  // raw -> calibrated
+): number {
+  // find nearest calibrated values and interpolate
+  const sortedKeys = [...isotonicMap.keys()].sort((a, b) => a - b);
+  
+  let lower = sortedKeys[0];
+  let upper = sortedKeys[sortedKeys.length - 1];
+  
+  for (let i = 0; i < sortedKeys.length - 1; i++) {
+    if (sortedKeys[i] <= rawConfidence && sortedKeys[i + 1] >= rawConfidence) {
+      lower = sortedKeys[i];
+      upper = sortedKeys[i + 1];
+      break;
+    }
+  }
+  
+  // linear interpolation
+  const ratio = (rawConfidence - lower) / (upper - lower || 1);
+  const calibratedLower = isotonicMap.get(lower)!;
+  const calibratedUpper = isotonicMap.get(upper)!;
+  
+  return calibratedLower + ratio * (calibratedUpper - calibratedLower);
+}
+
+async function calibrateConfidence(
+  judgeId: string,
+  dimension: string,
+  rawConfidence: number
+): Promise<CalibratedConfidence> {
+  const judge = await judgeRegistry.get(judgeId);
+  const calibrationModel = judge.calibrationModels[dimension];
+  
+  if (!calibrationModel || calibrationModel.trainedOn < 30) {
+    // not enough data, use raw with uncertainty
+    return {
+      calibrated: rawConfidence,
+      raw: rawConfidence,
+      uncertainty: 0.2,
+      method: 'uncalibrated',
+      warning: 'Insufficient calibration data'
+    };
+  }
+  
+  let calibrated: number;
+  
+  if (calibrationModel.type === 'platt') {
+    calibrated = plattCalibrate(rawConfidence, calibrationModel.parameters);
+  } else if (calibrationModel.type === 'isotonic') {
+    calibrated = isotonicCalibrate(rawConfidence, calibrationModel.parameters);
+  } else {
+    // ensemble: average of both
+    const plattResult = plattCalibrate(rawConfidence, calibrationModel.parameters.platt);
+    const isotonicResult = isotonicCalibrate(rawConfidence, calibrationModel.parameters.isotonic);
+    calibrated = (plattResult + isotonicResult) / 2;
+  }
+  
+  // compute uncertainty based on calibration quality
+  const calibrationError = judge.calibrationError;
+  const uncertainty = Math.sqrt(calibrationError * (1 - calibrationError) / calibrationModel.trainedOn);
+  
+  return {
+    calibrated,
+    raw: rawConfidence,
+    uncertainty,
+    method: calibrationModel.type,
+    confidenceInterval: {
+      lower: Math.max(0, calibrated - 1.96 * uncertainty),
+      upper: Math.min(1, calibrated + 1.96 * uncertainty)
+    }
+  };
+}
+```
+
+---
+
+# 7. Reasoning Chains
+
+## Explicit Step-by-Step Audit Trail
+
+```typescript
+interface ReasoningStep {
+  stepId: string;
+  type: 'observation' | 'inference' | 'assumption' | 'conclusion' | 'calculation';
+  content: string;
+  supportingEvidence: string[];
+  confidence: number;
+  dependsOn: string[];  // previous step IDs
+}
+
+interface ReasoningChain {
+  judgeId: string;
+  dimension: string;
+  steps: ReasoningStep[];
+  finalConclusion: string;
+  totalConfidence: number;
+  weakestLink: ReasoningStep;
+}
+
+const REASONING_PROMPT = (dimension: string, evidence: string[]) => `
+You are evaluating the ${dimension} dimension.
+
+Evidence:
+${evidence.map((e, i) => `[${i + 1}] ${e}`).join('\n')}
+
+Provide your reasoning as explicit steps. Each step must be one of:
+- OBSERVATION: Something directly stated in evidence
+- INFERENCE: A conclusion drawn from observations
+- ASSUMPTION: Something you're assuming (flag uncertainty)
+- CALCULATION: A computed value
+- CONCLUSION: Your final verdict
+
+Format each step as:
+STEP [N] ([TYPE]): [Content]
+EVIDENCE: [Which evidence items support this, or "none" for assumptions]
+CONFIDENCE: [0.0-1.0]
+DEPENDS ON: [Previous step numbers, or "none"]
+
+After all steps, provide:
+FINAL VERDICT: [Your conclusion]
+FINAL SCORE: [0.0-1.0]
+WEAKEST STEP: [Which step has lowest confidence]
+`;
+
+function parseReasoningChain(llmOutput: string, judgeId: string, dimension: string): ReasoningChain {
+  const steps: ReasoningStep[] = [];
+  const stepPattern = /STEP \[(\d+)\] \((\w+)\): (.+?)\nEVIDENCE: (.+?)\nCONFIDENCE: ([\d.]+)\nDEPENDS ON: (.+?)(?=\n\nSTEP|\n\nFINAL)/gs;
+  
+  let match;
+  while ((match = stepPattern.exec(llmOutput)) !== null) {
+    steps.push({
+      stepId: `step-${match[1]}`,
+      type: match[2].toLowerCase() as ReasoningStep['type'],
+      content: match[3].trim(),
+      supportingEvidence: match[4] === 'none' ? [] : match[4].split(',').map(s => s.trim()),
+      confidence: parseFloat(match[5]),
+      dependsOn: match[6] === 'none' ? [] : match[6].split(',').map(s => `step-${s.trim()}`)
+    });
+  }
+  
+  const verdictMatch = llmOutput.match(/FINAL VERDICT: (.+)/);
+  const scoreMatch = llmOutput.match(/FINAL SCORE: ([\d.]+)/);
+  const weakestMatch = llmOutput.match(/WEAKEST STEP: (\d+)/);
+  
+  const weakestLink = steps.reduce((min, s) => s.confidence < min.confidence ? s : min, steps[0]);
+  
+  // total confidence is product of step confidences along critical path
+  const criticalPath = findCriticalPath(steps);
+  const totalConfidence = criticalPath.reduce((acc, s) => acc * s.confidence, 1);
+  
+  return {
+    judgeId,
+    dimension,
+    steps,
+    finalConclusion: verdictMatch?.[1] || 'No verdict',
+    totalConfidence,
+    weakestLink
+  };
+}
+
+function findCriticalPath(steps: ReasoningStep[]): ReasoningStep[] {
+  // find path from first step to conclusion with lowest confidence product
+  const conclusions = steps.filter(s => s.type === 'conclusion');
+  if (conclusions.length === 0) return steps;
+  
+  const paths: ReasoningStep[][] = [];
+  
+  function buildPath(step: ReasoningStep, currentPath: ReasoningStep[]): void {
+    const newPath = [...currentPath, step];
+    
+    if (step.dependsOn.length === 0) {
+      paths.push(newPath.reverse());
+      return;
+    }
+    
+    for (const depId of step.dependsOn) {
+      const depStep = steps.find(s => s.stepId === depId);
+      if (depStep) {
+        buildPath(depStep, newPath);
+      }
+    }
+  }
+  
+  for (const conclusion of conclusions) {
+    buildPath(conclusion, []);
+  }
+  
+  // return path with lowest confidence product
+  return paths.reduce((minPath, path) => {
+    const pathConf = path.reduce((acc, s) => acc * s.confidence, 1);
+    const minConf = minPath.reduce((acc, s) => acc * s.confidence, 1);
+    return pathConf < minConf ? path : minPath;
+  }, paths[0] || []);
+}
+```
+
+---
+
+# 8. Human Escalation
+
+## Escalation Protocol
+
+```typescript
+interface EscalationRequest {
+  evaluationId: string;
+  reason: EscalationReason;
+  urgency: 'low' | 'medium' | 'high' | 'critical';
+  dimensionsAffected: string[];
+  currentResults: Record<string, DimensionResult>;
+  specificQuestions: string[];
+  deadline?: Date;
+}
+
+type EscalationReason = 
+  | 'low_confidence'
+  | 'high_stakes'
+  | 'conflicting_evidence'
+  | 'domain_expertise_required'
+  | 'ethical_concern'
+  | 'novel_situation'
+  | 'adversarial_detected';
+
+interface HumanInput {
+  evaluationId: string;
+  reviewer: string;
+  timestamp: Date;
+  dimensionOverrides: Record<string, DimensionOverride>;
+  additionalContext?: string;
+  decision: 'accept' | 'reject' | 'modify';
+}
+
+interface DimensionOverride {
+  originalScore: number;
+  overrideScore: number;
+  originalVerdict: string;
+  overrideVerdict?: string;
+  justification: string;
+}
+
+const ESCALATION_THRESHOLDS = {
+  low_confidence: 0.4,
+  high_stakes_keywords: ['safety', 'legal liability', 'security breach', 'financial loss > $1M'],
+  conflicting_evidence_count: 3,
+  novel_similarity_threshold: 0.3  // very different from past evaluations
+};
+
+function shouldEscalate(
+  results: Record<string, DimensionResult>,
+  task: Task,
+  adversarialCheck: AdversarialCheck,
+  similarPastEvaluations: EvaluationMemory[]
+): EscalationRequest | null {
+  const reasons: EscalationReason[] = [];
+  const affectedDimensions: string[] = [];
+  const questions: string[] = [];
+  
+  // check low confidence
+  for (const [dim, result] of Object.entries(results)) {
+    if (result.confidence < ESCALATION_THRESHOLDS.low_confidence) {
+      reasons.push('low_confidence');
+      affectedDimensions.push(dim);
+      questions.push(`What additional evidence would help assess ${dim}?`);
+    }
+  }
+  
+  // check high stakes
+  const taskLower = task.query.toLowerCase();
+  if (ESCALATION_THRESHOLDS.high_stakes_keywords.some(kw => taskLower.includes(kw))) {
+    reasons.push('high_stakes');
+    questions.push('Given the high stakes, does this assessment require expert review?');
+  }
+  
+  // check adversarial
+  if (adversarialCheck.isManipulated) {
+    reasons.push('adversarial_detected');
+    questions.push(`Potential manipulation detected: ${adversarialCheck.manipulationType}. Please review.`);
+  }
+  
+  // check novelty
+  const maxSimilarity = Math.max(...similarPastEvaluations.map(e => e.similarity || 0), 0);
+  if (maxSimilarity < ESCALATION_THRESHOLDS.novel_similarity_threshold) {
+    reasons.push('novel_situation');
+    questions.push('This task is unlike previous evaluations. Is the approach appropriate?');
+  }
+  
+  if (reasons.length === 0) {
+    return null;
+  }
+  
+  return {
+    evaluationId: task.id,
+    reason: reasons[0],  // primary reason
+    urgency: determineUrgency(reasons),
+    dimensionsAffected: [...new Set(affectedDimensions)],
+    currentResults: results,
+    specificQuestions: questions
+  };
+}
+
+async function processHumanInput(
+  input: HumanInput,
+  originalResults: Record<string, DimensionResult>
+): Promise<Record<string, DimensionResult>> {
+  const updatedResults = { ...originalResults };
+  
+  for (const [dim, override] of Object.entries(input.dimensionOverrides)) {
+    if (updatedResults[dim]) {
+      updatedResults[dim] = {
+        ...updatedResults[dim],
+        score: override.overrideScore,
+        verdict: override.overrideVerdict || updatedResults[dim].verdict,
+        humanOverride: {
+          originalScore: override.originalScore,
+          reviewer: input.reviewer,
+          justification: override.justification,
+          timestamp: input.timestamp
+        }
+      };
+    }
+  }
+  
+  // store human input as ground truth for learning
+  await recordFeedback(input.evaluationId, {
+    dimension: 'all',
+    actualOutcome: input.decision === 'accept' ? 'correct' : 'incorrect',
+    feedbackSource: 'human',
+    feedbackDate: input.timestamp,
+    notes: input.additionalContext
+  });
+  
+  return updatedResults;
+}
+```
+
+---
+
+# 9. Scaling: Hierarchical Processing
+
+## Chunking + Progressive Summarization
+
+```typescript
+interface DocumentChunk {
+  id: string;
+  content: string;
+  embedding: number[];
+  position: number;  // order in original
+  summary?: string;
+  relevanceToQuery?: number;
+}
+
+interface ChunkHierarchy {
+  level: number;
+  chunks: DocumentChunk[];
+  summaries: string[];
+  parentChunks?: ChunkHierarchy;
+}
+
+async function buildChunkHierarchy(
+  documents: string[],
+  query: string,
+  maxTokensPerLevel: number = 4000
+): Promise<ChunkHierarchy> {
+  // level 0: raw chunks
+  const rawChunks = chunkDocuments(documents, 500);  // 500 tokens per chunk
+  const embeddings = await Promise.all(rawChunks.map(c => embed(c.content)));
+  const queryEmbedding = await embed(query);
+  
+  // score relevance
+  const scoredChunks = rawChunks.map((chunk, i) => ({
+    ...chunk,
+    embedding: embeddings[i],
+    relevanceToQuery: cosineSimilarity(embeddings[i], queryEmbedding)
+  }));
+  
+  // sort by relevance
+  scoredChunks.sort((a, b) => b.relevanceToQuery! - a.relevanceToQuery!);
+  
+  // build hierarchy
+  const levels: ChunkHierarchy[] = [];
+  let currentChunks = scoredChunks;
+  let level = 0;
+  
+  while (totalTokens(currentChunks) > maxTokensPerLevel) {
+    // summarize groups of chunks
+    const groupSize = Math.ceil(currentChunks.length / (maxTokensPerLevel / 500));
+    const groups = groupChunks(currentChunks, groupSize);
+    
+    const summaries = await Promise.all(
+      groups.map(group => summarizeChunks(group, query))
+    );
+    
+    const summarizedChunks = summaries.map((summary, i) => ({
+      id: `level${level + 1}-chunk${i}`,
+      content: summary,
+      embedding: await embed(summary),
+      position: i,
+      relevanceToQuery: groups[i].reduce((sum, c) => sum + c.relevanceToQuery!, 0) / groups[i].length
+    }));
+    
+    levels.push({
+      level,
+      chunks: currentChunks,
+      summaries: summaries
+    });
+    
+    currentChunks = summarizedChunks;
+    level++;
+  }
+  
+  // top level
+  levels.push({
+    level,
+    chunks: currentChunks,
+    summaries: []
+  });
+  
+  // link levels
+  for (let i = levels.length - 1; i > 0; i--) {
+    levels[i].parentChunks = levels[i - 1];
+  }
+  
+  return levels[levels.length - 1];
+}
+
+async function progressiveRetrieval(
+  hierarchy: ChunkHierarchy,
+  query: string,
+  targetChunks: number = 10
+): Promise<DocumentChunk[]> {
+  const queryEmbedding = await embed(query);
+  let currentLevel = hierarchy;
+  let selectedChunks: DocumentChunk[] = [];
+  
+  // traverse down hierarchy, selecting most relevant at each level
+  while (currentLevel) {
+    const scored = currentLevel.chunks.map(chunk => ({
+      chunk,
+      score: cosineSimilarity(chunk.embedding, queryEmbedding)
+    }));
+    
+    scored.sort((a, b) => b.score - a.score);
+    
+    // select top chunks at this level
+    const selected = scored.slice(0, Math.min(targetChunks, scored.length));
+    selectedChunks = selected.map(s => s.chunk);
+    
+    // if we have children and need more detail, go down
+    if (currentLevel.parentChunks && selectedChunks.length < targetChunks) {
+      currentLevel = currentLevel.parentChunks;
+    } else {
+      break;
+    }
+  }
+  
+  return selectedChunks;
+}
+```
+
+---
+
+# 10. Complete Pipeline
+
+```typescript
+async function evaluateV8(task: Task): Promise<EvaluationResultV8> {
+  const startTime = Date.now();
+  
+  // 1. retrieve similar past evaluations
+  const similarEvaluations = await retrieveSimilarEvaluations(task.query);
+  const learnedPatterns = extractPatternsFromMemory(similarEvaluations);
+  
+  // 2. process documents with hierarchical chunking if large
+  let evidence: EncodedEvidence[];
+  if (totalTokens(task.documents) > 10000) {
+    const hierarchy = await buildChunkHierarchy(task.documents, task.query);
+    const relevantChunks = await progressiveRetrieval(hierarchy, task.query);
+    evidence = await encodeEvidence(relevantChunks.map(c => c.content), task.query);
+  } else {
+    evidence = await encodeEvidence(task.documents, task.query);
+  }
+  
+  // 3. apply freshness scoring
+  evidence = evidence.map(e => adjustWeightForFreshness(e, extractFreshness(e)));
+  
+  // 4. adversarial detection
+  const adversarialCheck = await detectManipulation(evidence, task.query);
+  if (adversarialCheck.isManipulated && adversarialCheck.confidence > 0.8) {
+    return {
+      status: 'blocked',
+      reason: 'Potential evidence manipulation detected',
+      adversarialCheck,
+      processingTime: Date.now() - startTime
+    };
+  }
+  
+  // 5. staged evaluation
+  const stagedResult = await stagedEvaluation(task, evidence);
+  
+  // 6. if needed, run deliberation
+  let finalResults = stagedResult.results;
+  let deliberation: DeliberationResult | null = null;
+  
+  if (stagedResult.stageCompleted >= 3) {
+    deliberation = await runDeliberation(task, evidence, stagedResult.results);
+    finalResults = deliberation.finalResults;
+  }
+  
+  // 7. build dependency graph and propagate uncertainty
+  const dependencyGraph = buildDependencyGraph(finalResults);
+  const adjustedResults = propagateUncertainty(dependencyGraph);
+  
+  // 8. calibrate confidence
+  for (const [dim, result] of Object.entries(adjustedResults)) {
+    const calibrated = await calibrateConfidence(
+      result.judgeId,
+      dim,
+      result.adjustedConfidence
+    );
+    adjustedResults[dim].calibratedConfidence = calibrated;
+  }
+  
+  // 9. check for human escalation
+  const escalation = shouldEscalate(adjustedResults, task, adversarialCheck, similarEvaluations);
+  
+  // 10. synthesize
+  const synthesis = synthesize(adjustedResults, dependencyGraph, deliberation);
+  
+  // 11. store for learning
+  const evaluationId = await storeEvaluation({
+    task,
+    evidence,
+    results: adjustedResults,
+    dependencyGraph,
+    deliberation,
+    synthesis,
+    processingTime: Date.now() - startTime
+  });
+  
+  return {
+    evaluationId,
+    status: escalation ? 'pending_human_review' : 'complete',
+    dimensions: adjustedResults,
+    dependencyGraph,
+    synthesis,
+    deliberation,
+    escalation,
+    adversarialCheck,
+    signalQuality: computeOverallSignalQuality(evidence),
+    processingTime: Date.now() - startTime,
+    meta: {
+      stagesRun: stagedResult.stageCompleted,
+      deliberationRounds: deliberation?.roundsNeeded || 0,
+      similarPastEvaluations: similarEvaluations.length,
+      patternsApplied: Object.keys(learnedPatterns)
+    }
+  };
+}
+```
+
+---
+
+# Output Schema v8
+
+```typescript
+interface EvaluationResultV8 {
+  evaluationId: string;
+  status: 'complete' | 'pending_human_review' | 'blocked';
+  
+  dimensions: Record<string, AdjustedDimensionResult>;
+  
+  dependencyGraph: {
+    edges: DependencyEdge[];
+    propagationApplied: boolean;
+  };
+  
+  synthesis: {
+    summary: string;
+    narrative: string;
+    recommendation: string;
+    passDimensions: string[];
+    failDimensions: string[];
+    conditionalDimensions: string[];
+  };
+  
+  deliberation?: {
+    roundsNeeded: number;
+    consensusReached: boolean;
+    unresolvedChallenges: Challenge[];
+  };
+  
+  escalation?: EscalationRequest;
+  
+  adversarialCheck: AdversarialCheck;
+  
+  signalQuality: SignalQuality;
+  
+  confidence: {
+    perDimension: Record<string, CalibratedConfidence>;
+    overall: CalibratedConfidence;
+    calibrationMethod: string;
+  };
+  
+  reasoningChains: Record<string, ReasoningChain>;
+  
+  processingTime: number;
+  
+  meta: {
+    stagesRun: number;
+    deliberationRounds: number;
+    similarPastEvaluations: number;
+    patternsApplied: string[];
+    humanOverrides?: Record<string, DimensionOverride>;
+  };
+}
+
+interface AdjustedDimensionResult extends DimensionResult {
+  originalScore: number;
+  originalConfidence: number;
+  adjustedScore: number;
+  adjustedConfidence: number;
+  calibratedConfidence: CalibratedConfidence;
+  adjustmentReasons: string[];
+  reasoningChain: ReasoningChain;
+}
+```
+
+---
+
+# Summary of v8 Improvements
+
+| Component | What It Does |
+|-----------|--------------|
+| **Memory Store** | Stores past evaluations, retrieves similar cases, enables learning |
+| **Feedback Loop** | Records ground truth, updates judge calibration over time |
+| **Embedding Router** | Trained model routes evidence to channels, not keyword matching |
+| **Freshness Scoring** | Weights evidence by age and topic volatility |
+| **Adversarial Detection** | Catches manipulation attempts before evaluation |
+| **Staged Evaluation** | Cheap fast check first, deep evaluation only if needed |
+| **Deliberation Engine** | Multi-round, judges challenge each other |
+| **Dependency Graph** | Typed edges, uncertainty propagation |
+| **Confidence Calibration** | Platt scaling turns scores into real probabilities |
+| **Reasoning Chains** | Explicit step-by-step audit trail |
+| **Human Escalation** | Clear paths for when automation isn't enough |
+| **Hierarchical Chunking** | Handles large documents via progressive summarization |
+
+---
+
+*Universal Contract v8.0 — Adaptive Multi-Dimensional Reasoning Framework*
