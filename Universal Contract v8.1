@@ -1,0 +1,574 @@
+# Universal Contract v8.1 - Improvements Based on Test Analysis
+
+## Test Results Analysis
+
+### What's Broken (Root Causes)
+
+| Issue | Evidence | Root Cause |
+|-------|----------|------------|
+| Medium difficulty 20% | Easy: 58%, Hard: 46%, Medium: 20% | System handles extremes but not nuance |
+| Acquisition 20% | acq-003 Strategic Fit failed as "pass" | Too optimistic, ignores mixed signals |
+| Security 20% | sec-002 false positive | Adversarial patterns too broad |
+| Operational 0% | No training data | Judge has no calibration history |
+| vendor-003 failed | Expected mixed, got pass | Financial negative signals ignored |
+| proj-002 failed | Technical score 0.16, expected 0.80 | Keyword "budget" killed tech score |
+
+### The Core Problem: Binary Thinking
+
+The system thinks in extremes:
+- "compliant" → score goes UP
+- "risk" → score goes DOWN
+- But real documents have BOTH
+
+Example from vendor-003 (Mixed Signals):
+```
+"Technical solution is excellent with strong architecture"  → +0.25
+"However, pricing is 40% above market with poor ROI"        → -0.35
+```
+System averages to ~0.5, but should recognize:
+- Technical: HIGH (0.80)
+- Financial: LOW (0.30)
+- Overall: MIXED (not averaged)
+
+---
+
+## Fix #1: Semantic Similarity (Replace Mock Embeddings)
+
+**Problem**: Hash-based embeddings don't understand meaning.
+- "technical debt" and "outdated architecture" = 0.12 similarity
+- Should be: 0.85+ similarity
+
+**Solution**: Use sentence-transformers or OpenAI embeddings.
+
+```typescript
+// OLD: Hash-based (broken)
+function mockEmbed(text: string): number[] {
+  const hash = text.split('').reduce((acc, char) => {
+    return ((acc << 5) - acc) + char.charCodeAt(0);
+  }, 0);
+  // ... deterministic but meaningless
+}
+
+// NEW: Semantic clusters (intermediate fix without API)
+const SEMANTIC_CLUSTERS = {
+  tech_positive: ['scalable', 'modern', 'robust', 'efficient', 'secure', 'validated', 'proven', 'architecture'],
+  tech_negative: ['legacy', 'outdated', 'debt', 'monolith', 'fragile', 'insecure', 'vulnerable', 'deprecated'],
+  fin_positive: ['profit', 'roi', 'growth', 'margin', 'revenue', 'gain', 'surplus', 'efficient'],
+  fin_negative: ['loss', 'overrun', 'cost', 'expense', 'deficit', 'decline', 'budget exceeded'],
+  risk_positive: ['mitigated', 'controlled', 'stable', 'reliable', 'low risk', 'validated'],
+  risk_negative: ['risk', 'threat', 'vulnerability', 'exposure', 'uncertain', 'volatile', 'failure'],
+  legal_positive: ['compliant', 'approved', 'certified', 'validated', 'licensed', 'authorized'],
+  legal_negative: ['non-compliant', 'violation', 'liability', 'lawsuit', 'breach', 'penalty']
+};
+
+function computeClusterSimilarity(text: string, cluster: string[]): number {
+  const words = text.toLowerCase().split(/\s+/);
+  let matches = 0;
+  let partialMatches = 0;
+  
+  for (const word of words) {
+    for (const term of cluster) {
+      if (word === term || word.includes(term) || term.includes(word)) {
+        matches++;
+      } else if (levenshteinDistance(word, term) <= 2) {
+        partialMatches += 0.5;
+      }
+    }
+  }
+  
+  return Math.min(1, (matches + partialMatches) / Math.max(cluster.length * 0.3, 1));
+}
+```
+
+---
+
+## Fix #2: Dimension-Specific Scoring (Not Global)
+
+**Problem**: All dimensions see all signals, causing cross-contamination.
+- proj-002: "budget overrun" killed TECHNICAL score (should only affect FINANCIAL)
+
+**Solution**: Route evidence to specific dimensions BEFORE scoring.
+
+```typescript
+interface DimensionRouter {
+  dimension: string;
+  primaryKeywords: string[];
+  excludeKeywords: string[];  // NEW: Don't penalize for unrelated negative words
+  boostKeywords: string[];
+}
+
+const DIMENSION_ROUTERS: DimensionRouter[] = [
+  {
+    dimension: 'technical',
+    primaryKeywords: ['architecture', 'system', 'code', 'infrastructure', 'scalability', 'performance'],
+    excludeKeywords: ['budget', 'cost', 'price', 'legal', 'contract', 'compliance'],
+    boostKeywords: ['technical', 'engineering', 'development']
+  },
+  {
+    dimension: 'financial',
+    primaryKeywords: ['cost', 'budget', 'roi', 'revenue', 'profit', 'expense', 'investment'],
+    excludeKeywords: ['architecture', 'code', 'compliance', 'regulation'],
+    boostKeywords: ['financial', 'fiscal', 'monetary']
+  },
+  // ... etc
+];
+
+function routeEvidence(evidence: Evidence[], dimension: string): Evidence[] {
+  const router = DIMENSION_ROUTERS.find(r => r.dimension === dimension);
+  if (!router) return evidence;
+  
+  return evidence.filter(e => {
+    const text = e.content.toLowerCase();
+    
+    // Must have at least one primary keyword
+    const hasPrimary = router.primaryKeywords.some(kw => text.includes(kw));
+    
+    // If it ONLY has excluded keywords, skip it
+    const hasOnlyExcluded = router.excludeKeywords.some(kw => text.includes(kw)) &&
+                           !router.primaryKeywords.some(kw => text.includes(kw));
+    
+    return hasPrimary || (!hasOnlyExcluded && router.boostKeywords.some(kw => text.includes(kw)));
+  });
+}
+```
+
+---
+
+## Fix #3: Nuanced Signal Detection (Not Binary)
+
+**Problem**: System treats "excellent" and "good" the same. Treats "risk" and "catastrophic risk" the same.
+
+**Solution**: Signal intensity scoring.
+
+```typescript
+const SIGNAL_INTENSITY = {
+  // Positive signals with intensity (0-1)
+  positive: {
+    'excellent': 1.0, 'outstanding': 1.0, 'exceptional': 1.0,
+    'strong': 0.8, 'robust': 0.8, 'solid': 0.7,
+    'good': 0.6, 'adequate': 0.5, 'acceptable': 0.4,
+    'compliant': 0.7, 'certified': 0.8, 'approved': 0.7
+  },
+  // Negative signals with intensity
+  negative: {
+    'catastrophic': 1.0, 'critical': 0.9, 'severe': 0.9,
+    'significant': 0.7, 'moderate': 0.5, 'minor': 0.3,
+    'concern': 0.4, 'issue': 0.4, 'risk': 0.5,
+    'failure': 0.8, 'breach': 0.9, 'non-compliant': 0.8
+  },
+  // Hedging words that REDUCE confidence
+  hedging: {
+    'however': 0.8,  // multiply confidence by this
+    'but': 0.85,
+    'although': 0.8,
+    'despite': 0.75,
+    'yet': 0.85,
+    'potential': 0.9,
+    'possibly': 0.7,
+    'may': 0.8
+  }
+};
+
+function computeSignalScore(text: string): { 
+  positiveScore: number; 
+  negativeScore: number; 
+  hedgingFactor: number;
+  netSignal: number;
+} {
+  const words = text.toLowerCase();
+  let positiveScore = 0;
+  let negativeScore = 0;
+  let hedgingFactor = 1.0;
+  
+  // Count positive signals
+  for (const [word, intensity] of Object.entries(SIGNAL_INTENSITY.positive)) {
+    if (words.includes(word)) {
+      positiveScore += intensity;
+    }
+  }
+  
+  // Count negative signals (weighted 1.3x - negativity bias)
+  for (const [word, intensity] of Object.entries(SIGNAL_INTENSITY.negative)) {
+    if (words.includes(word)) {
+      negativeScore += intensity * 1.3;
+    }
+  }
+  
+  // Apply hedging penalty
+  for (const [word, factor] of Object.entries(SIGNAL_INTENSITY.hedging)) {
+    if (words.includes(word)) {
+      hedgingFactor *= factor;
+    }
+  }
+  
+  const netSignal = (positiveScore - negativeScore) * hedgingFactor;
+  
+  return { positiveScore, negativeScore, hedgingFactor, netSignal };
+}
+```
+
+---
+
+## Fix #4: Contradiction-Aware Scoring
+
+**Problem**: Contradictions found but confidence only multiplied by 0.9.
+
+**Solution**: Contradictions should create UNCERTAINTY, not just lower confidence.
+
+```typescript
+interface ContradictionResult {
+  hasContradiction: boolean;
+  contradictingPairs: Array<{ a: string; b: string; topic: string }>;
+  uncertaintyIncrease: number;  // How much to widen confidence interval
+  scoreImpact: number;          // How much to penalize score
+}
+
+function analyzeContradictions(evidence: Evidence[]): ContradictionResult {
+  const contradictions: Array<{ a: string; b: string; topic: string }> = [];
+  
+  const CONTRADICTION_PATTERNS = [
+    { positive: /on track|on schedule|meeting milestones/i, negative: /delayed|behind|overdue/i, topic: 'timeline' },
+    { positive: /under budget|on budget|cost effective/i, negative: /over budget|cost overrun|exceeded/i, topic: 'budget' },
+    { positive: /successful|succeeded|achieved/i, negative: /failed|failure|unsuccessful/i, topic: 'outcome' },
+    { positive: /secure|protected|safe/i, negative: /vulnerable|breach|insecure/i, topic: 'security' },
+    { positive: /compliant|approved/i, negative: /non-compliant|rejected|violation/i, topic: 'compliance' },
+    { positive: /growth|increase|improvement/i, negative: /decline|decrease|degradation/i, topic: 'trend' }
+  ];
+  
+  for (let i = 0; i < evidence.length; i++) {
+    for (let j = i + 1; j < evidence.length; j++) {
+      const textA = evidence[i].content;
+      const textB = evidence[j].content;
+      
+      for (const pattern of CONTRADICTION_PATTERNS) {
+        const aPositive = pattern.positive.test(textA);
+        const aNegative = pattern.negative.test(textA);
+        const bPositive = pattern.positive.test(textB);
+        const bNegative = pattern.negative.test(textB);
+        
+        if ((aPositive && bNegative) || (aNegative && bPositive)) {
+          contradictions.push({ a: textA, b: textB, topic: pattern.topic });
+        }
+      }
+    }
+  }
+  
+  const count = contradictions.length;
+  
+  return {
+    hasContradiction: count > 0,
+    contradictingPairs: contradictions,
+    uncertaintyIncrease: Math.min(0.3, count * 0.1),  // Up to 30% wider CI
+    scoreImpact: Math.max(0.5, 1 - count * 0.15)      // Down to 0.5x score
+  };
+}
+```
+
+---
+
+## Fix #5: Smarter Adversarial Detection (Reduce False Positives)
+
+**Problem**: sec-002 (legitimate security vulnerability report) flagged as adversarial.
+- The word "breach" + "vulnerability" triggered cherry-picking detection
+
+**Solution**: Context-aware adversarial detection.
+
+```typescript
+function detectAdversarial(evidence: Evidence[], context: string): AdversarialCheck {
+  // INJECTION: Still strict (these are always bad)
+  const INJECTION_PATTERNS = [
+    /ignore\s+(all\s+)?previous/i,
+    /disregard\s+(all\s+)?instructions/i,
+    /you\s+are\s+now/i,
+    /pretend\s+(you\s+are|to\s+be)/i,
+    /bypass\s+(all\s+)?restrictions/i,
+    /jailbreak/i,
+    /\bDAN\b/,  // "Do Anything Now"
+    /system:\s*override/i
+  ];
+  
+  // Check for injection (high confidence, always flag)
+  for (const ev of evidence) {
+    for (const pattern of INJECTION_PATTERNS) {
+      if (pattern.test(ev.content)) {
+        return {
+          isManipulated: true,
+          manipulationType: 'injection_attempt',
+          confidence: 0.95,
+          evidence: [ev.content.substring(0, 100)]
+        };
+      }
+    }
+  }
+  
+  // CONTEXT-AWARE checks (reduced false positives)
+  const taskLower = context.toLowerCase();
+  const isSecurityReview = taskLower.includes('security') || 
+                          taskLower.includes('vulnerability') ||
+                          taskLower.includes('breach') ||
+                          taskLower.includes('audit');
+  
+  // If this IS a security review, allow security-related negative words
+  if (!isSecurityReview) {
+    // Only flag cherry-picking if NOT a security context
+    const negativeSecurityTerms = evidence.filter(e => 
+      /breach|vulnerability|attack|exploit/i.test(e.content)
+    ).length;
+    
+    if (negativeSecurityTerms > evidence.length * 0.8) {
+      return {
+        isManipulated: true,
+        manipulationType: 'potential_cherry_picking',
+        confidence: 0.6,  // Lower confidence, might be legitimate
+        evidence: ['High concentration of security-negative terms']
+      };
+    }
+  }
+  
+  return { isManipulated: false, confidence: 0, evidence: [] };
+}
+```
+
+---
+
+## Fix #6: Dependency Propagation (Actually Works)
+
+**Problem**: fin-004 "Financial: Dependencies" - technical risk should have degraded financial score.
+
+**Solution**: Explicit dependency graph traversal.
+
+```typescript
+interface DependencyRule {
+  if: { dimension: string; condition: (score: number) => boolean };
+  then: { dimension: string; effect: (score: number, sourceScore: number) => number };
+  reason: string;
+}
+
+const DEPENDENCY_RULES: DependencyRule[] = [
+  {
+    if: { dimension: 'technical', condition: (s) => s < 0.5 },
+    then: { dimension: 'financial', effect: (fin, tech) => fin * (0.6 + tech * 0.4) },
+    reason: 'Technical issues increase financial risk'
+  },
+  {
+    if: { dimension: 'technical', condition: (s) => s < 0.5 },
+    then: { dimension: 'operational', effect: (ops, tech) => ops * (0.7 + tech * 0.3) },
+    reason: 'Technical issues impact operations'
+  },
+  {
+    if: { dimension: 'legal', condition: (s) => s < 0.4 },
+    then: { dimension: 'risk', effect: (risk, legal) => Math.min(risk, 0.4) },
+    reason: 'Legal issues cap overall risk assessment'
+  },
+  {
+    if: { dimension: 'security', condition: (s) => s < 0.4 },
+    then: { dimension: 'risk', effect: (risk, sec) => risk * 0.6 },
+    reason: 'Security issues significantly increase risk'
+  },
+  {
+    if: { dimension: 'financial', condition: (s) => s < 0.3 },
+    then: { dimension: 'risk', effect: (risk, fin) => Math.min(risk, 0.5) },
+    reason: 'Financial distress caps risk assessment'
+  }
+];
+
+function applyDependencies(
+  results: Record<string, DimensionResult>
+): Record<string, DimensionResult> {
+  const adjusted = JSON.parse(JSON.stringify(results));
+  const appliedRules: string[] = [];
+  
+  for (const rule of DEPENDENCY_RULES) {
+    const source = results[rule.if.dimension];
+    const target = adjusted[rule.then.dimension];
+    
+    if (source && target && rule.if.condition(source.score)) {
+      const oldScore = target.score;
+      target.score = rule.then.effect(target.score, source.score);
+      target.confidence *= 0.9;  // Reduce confidence due to dependency
+      target.concerns.push(`[Dependency] ${rule.reason} (${rule.if.dimension}: ${source.score.toFixed(2)})`);
+      
+      appliedRules.push(`${rule.if.dimension} → ${rule.then.dimension}: ${oldScore.toFixed(2)} → ${target.score.toFixed(2)}`);
+    }
+  }
+  
+  console.log('Applied dependency rules:', appliedRules);
+  return adjusted;
+}
+```
+
+---
+
+## Fix #7: Bootstrap Calibration for New Judges
+
+**Problem**: Operational and Security dimensions have 0% accuracy because no training data.
+
+**Solution**: Bootstrap with synthetic calibration data.
+
+```typescript
+interface CalibrationBootstrap {
+  dimension: string;
+  syntheticPoints: Array<{ scenario: string; expectedScore: number; confidence: number }>;
+}
+
+const CALIBRATION_BOOTSTRAP: CalibrationBootstrap[] = [
+  {
+    dimension: 'operational',
+    syntheticPoints: [
+      { scenario: 'All processes documented and followed', expectedScore: 0.85, confidence: 0.8 },
+      { scenario: 'Team experienced, resources adequate', expectedScore: 0.75, confidence: 0.7 },
+      { scenario: 'Some process gaps identified', expectedScore: 0.55, confidence: 0.6 },
+      { scenario: 'Significant operational issues', expectedScore: 0.35, confidence: 0.7 },
+      { scenario: 'Operations in crisis, team departures', expectedScore: 0.15, confidence: 0.8 }
+    ]
+  },
+  {
+    dimension: 'security',
+    syntheticPoints: [
+      { scenario: 'All controls in place, recent audit passed', expectedScore: 0.90, confidence: 0.85 },
+      { scenario: 'Most controls adequate, minor gaps', expectedScore: 0.70, confidence: 0.7 },
+      { scenario: 'Some vulnerabilities identified', expectedScore: 0.50, confidence: 0.65 },
+      { scenario: 'Critical vulnerabilities present', expectedScore: 0.25, confidence: 0.75 },
+      { scenario: 'Active breach or major exposure', expectedScore: 0.10, confidence: 0.9 }
+    ]
+  }
+];
+
+function initializeJudgeCalibration(dimension: string): void {
+  const bootstrap = CALIBRATION_BOOTSTRAP.find(b => b.dimension === dimension);
+  if (!bootstrap) return;
+  
+  for (const point of bootstrap.syntheticPoints) {
+    // Add synthetic calibration data
+    updateCalibration(
+      `${dimension}-001`,
+      dimension,
+      point.confidence,
+      true  // Assume synthetic data is "correct"
+    );
+  }
+  
+  console.log(`Bootstrapped ${dimension} judge with ${bootstrap.syntheticPoints.length} calibration points`);
+}
+```
+
+---
+
+## Fix #8: Mixed Outcome Detection
+
+**Problem**: vendor-003 expected "mixed" but got evaluated as pass/fail binary.
+
+**Solution**: Explicit mixed outcome detection.
+
+```typescript
+interface OutcomeClassification {
+  outcome: 'clear_pass' | 'clear_fail' | 'mixed' | 'insufficient_data';
+  confidence: number;
+  reasoning: string;
+  dimensionBreakdown: Record<string, 'pass' | 'fail' | 'neutral'>;
+}
+
+function classifyOutcome(results: Record<string, DimensionResult>): OutcomeClassification {
+  const dimensions = Object.entries(results);
+  
+  const breakdown: Record<string, 'pass' | 'fail' | 'neutral'> = {};
+  let passCount = 0;
+  let failCount = 0;
+  let neutralCount = 0;
+  
+  for (const [dim, result] of dimensions) {
+    if (result.score >= 0.7) {
+      breakdown[dim] = 'pass';
+      passCount++;
+    } else if (result.score <= 0.4) {
+      breakdown[dim] = 'fail';
+      failCount++;
+    } else {
+      breakdown[dim] = 'neutral';
+      neutralCount++;
+    }
+  }
+  
+  const total = dimensions.length;
+  
+  // Clear pass: >70% dimensions pass, none fail
+  if (passCount / total >= 0.7 && failCount === 0) {
+    return {
+      outcome: 'clear_pass',
+      confidence: 0.8,
+      reasoning: `${passCount}/${total} dimensions pass, no failures`,
+      dimensionBreakdown: breakdown
+    };
+  }
+  
+  // Clear fail: >50% dimensions fail
+  if (failCount / total >= 0.5) {
+    return {
+      outcome: 'clear_fail',
+      confidence: 0.8,
+      reasoning: `${failCount}/${total} dimensions fail`,
+      dimensionBreakdown: breakdown
+    };
+  }
+  
+  // Mixed: Some pass AND some fail
+  if (passCount > 0 && failCount > 0) {
+    return {
+      outcome: 'mixed',
+      confidence: 0.7,
+      reasoning: `${passCount} pass, ${failCount} fail - mixed signals`,
+      dimensionBreakdown: breakdown
+    };
+  }
+  
+  // Insufficient: Too many neutral
+  if (neutralCount / total >= 0.6) {
+    return {
+      outcome: 'insufficient_data',
+      confidence: 0.5,
+      reasoning: `${neutralCount}/${total} dimensions inconclusive`,
+      dimensionBreakdown: breakdown
+    };
+  }
+  
+  // Default to mixed if unclear
+  return {
+    outcome: 'mixed',
+    confidence: 0.6,
+    reasoning: 'No clear pattern detected',
+    dimensionBreakdown: breakdown
+  };
+}
+```
+
+---
+
+## Implementation Priority
+
+| Fix | Impact | Effort | Priority |
+|-----|--------|--------|----------|
+| #2 Dimension-Specific Scoring | HIGH | LOW | 🔴 P0 |
+| #3 Nuanced Signals | HIGH | MEDIUM | 🔴 P0 |
+| #8 Mixed Outcome Detection | HIGH | LOW | 🔴 P0 |
+| #6 Dependency Propagation | MEDIUM | LOW | 🟡 P1 |
+| #5 Smarter Adversarial | MEDIUM | LOW | 🟡 P1 |
+| #4 Contradiction Handling | MEDIUM | MEDIUM | 🟡 P1 |
+| #7 Bootstrap Calibration | MEDIUM | LOW | 🟡 P1 |
+| #1 Semantic Embeddings | HIGH | HIGH | 🟢 P2 |
+
+---
+
+## Expected Impact
+
+After implementing fixes #2, #3, #8:
+
+| Metric | Before | Expected After |
+|--------|--------|----------------|
+| Medium difficulty | 20% | 50%+ |
+| Acquisition category | 20% | 40%+ |
+| vendor-003 (mixed) | FAIL | PASS |
+| proj-002 (tech score) | 0.16 | 0.75+ |
+| False positive rate | 3% | 0% |
+| Overall pass rate | 43% | 60%+ |
+
+The key insight: **Stop treating evaluation as binary classification**. Real contracts have nuanced, dimension-specific assessments.
